@@ -224,7 +224,7 @@ def _newton_solver_wrapper(manom, ecc, tolerance, max_iter, use_c=False, use_gpu
         eanom = _newton_solver(manom, ecc, tolerance=tolerance, max_iter=max_iter)
 
     return eanom
-
+'''
 def _newton_solver(manom, ecc, tolerance=1e-9, max_iter=100, eanom0=None):
     """
     Newton-Raphson solver for eccentric anomaly.
@@ -278,6 +278,58 @@ def _newton_solver(manom, ecc, tolerance=1e-9, max_iter=100, eanom0=None):
         eanom[ind] = _mikkola_solver_wrapper(manom[ind], ecc[ind]) # Send remaining orbits to the analytical version, this has not happened yet...
 
     return eanom
+'''
+
+import jax
+import jax.numpy as jnp
+
+def _newton_solver(manom, ecc, tolerance=1e-9, max_iter=10, eanom0=None):
+    """
+    Newton-Raphson solver for eccentric anomaly using JAX.
+
+    Args:
+        manom (jax.numpy.ndarray): array of mean anomalies
+        ecc (jax.numpy.ndarray): array of eccentricities
+        tolerance (float, optional): absolute tolerance of iterative computation. 
+            Defaults to 1e-9.
+        max_iter (int, optional): maximum number of iterations (fixed to 10).
+            Defaults to 10.
+        eanom0 (jax.numpy.ndarray): array of first guess for eccentric anomaly, same 
+            shape as manom (optional)
+
+    Return:
+        eanom (jax.numpy.ndarray): array of eccentric
+ anomalies
+    """
+    # Ensure manom and ecc are jax.numpy.ndarray
+    manom = jnp.asarray(manom)
+    
+    cc = jnp.asarray(ecc)
+
+    # Initialize at E=M, E=pi is better at very high eccentricities
+    if eanom0 is None:
+        eanom = jnp.copy(manom)
+    else:
+        eanom = jnp.copy(eanom0)
+
+    # Define the update function using JAX's automatic differentiation
+    def update_eanom(eanom, manom, ecc):
+        diff = (eanom - (ecc * jnp.sin(eanom)) - manom) / (1.0 - (ecc * jnp.cos(eanom)))
+        return eanom - diff
+
+    # Run the fixed number of iterations
+    for _ in range(max_iter):
+        eanom = jax.lax.cond(jnp.any(jnp.abs(update_eanom(eanom, manom, ecc)) > tolerance),
+                             true_operand=lambda x: update_eanom(x, manom, ecc),
+                             true_fun=lambda x: x,
+                             false_operand=lambda x: x,
+                             fal_fun=lambda x: x)
+    
+    return eanom
+
+
+
+
 
 def _CUDA_newton_solver(manom, ecc, tolerance=1e-9, max_iter=100, eanom0=None):
     """
