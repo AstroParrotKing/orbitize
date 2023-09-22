@@ -1,6 +1,106 @@
 import numpy as np
 import pdb
 
+from jax.config import config; config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import jax
+
+def chi2_lnlike(data, errors, corrs, model, jitter, seppa_indices, chi2_type='standard'):
+    print(jnp.ndim(model))
+    if jnp.ndim(model) == 3:
+        model = jnp.moveaxis(model, 2, 0)
+        jitter = jnp.moveaxis(jitter, 2, 0)
+        third_dim = True
+    elif jnp.ndim(model) == 2:
+        model = jnp.reshape(model, (1,) + model.shape)
+        jitter = jnp.reshape(jitter, (1,) + jitter.shape)
+        third_dim = False
+
+    if chi2_type == 'standard':
+        residual = (data - model)
+        if jnp.size(seppa_indices) > 0:
+            residual = jnp.array(residual)
+            residual = residual.at[:, seppa_indices, 1].set((residual[:, seppa_indices, 1] + 180.) % 360. - 180.)
+
+        sigma2 = errors**2 + jitter**2
+
+        if corrs is None:
+            chi2 = -0.5 * jnp.square(residual) / sigma2 - jnp.log(jnp.sqrt(2 * jnp.pi * sigma2))
+        else:
+            has_no_corr = jnp.isnan(corrs)
+            yes_corr = jnp.where(~has_no_corr)[0]
+            no_corr = jnp.where(has_no_corr)[0]
+    
+            chi2 = jnp.zeros_like(residual)
+            chi2 = chi2.at[:, no_corr].set(-0.5 * jnp.square(residual[:, no_corr]) / sigma2[:, no_corr] - jnp.log(jnp.sqrt(2 * jnp.pi * sigma2[:, no_corr])))
+    
+            chi2 = chi2.at[:, yes_corr].set(_chi2_2x2cov(residual[:, yes_corr], sigma2[:, yes_corr], corrs[yes_corr]))
+
+    elif chi2_type == 'log':
+        sep_data = data[seppa_indices, 0]
+        sep_model = model[:, seppa_indices, 0]
+        sep_error = errors[seppa_indices, 0]
+        pa_data = data[seppa_indices, 1]
+        pa_model = model[:, seppa_indices, 1]
+        pa_error = errors[seppa_indices, 1] * jnp.pi / 180
+    
+        sep_chi2_log = jnp.square(jnp.log(sep_data) - jnp.log(sep_model)) / jnp.square(sep_error / sep_data)
+        pa_resid = (pa_model - pa_data + 180.) % 360. - 180.
+        pa_chi2_log = 2 * (1 - jnp.cos(pa_resid * jnp.pi / 180)) / jnp.square(pa_error)
+    
+        residual = (data - model)
+        sigma2 = errors**2 + jitter**2
+    
+        chi2 = jnp.square(residual) / sigma2
+        chi2 = chi2.at[:, seppa_indices, 0].set(sep_chi2_log)
+        chi2 = chi2.at[:, seppa_indices, 1].set(pa_chi2_log)
+    
+        chi2 = -0.5 * chi2 - jnp.log(jnp.sqrt(2 * jnp.pi * sigma2))
+
+    if third_dim:
+        model = jnp.rollaxis(model, 0, 3)
+        jitter = jnp.rollaxis(jitter, 0, 3)
+        chi2 = jnp.rollaxis(chi2, 0, 3)
+
+    else:
+        model = model.reshape(model.shape[1:])
+        chi2 = chi2.reshape(chi2.shape[1:])
+        jitter = jitter.reshape(jitter.shape[1:])
+
+    return chi2
+
+
+def _chi2_2x2cov(residual, var, corrs):
+    det_C = var[:, :, 0] * var[:, :, 1] * (1 - jnp.square(corrs))
+    covs = corrs * jnp.sqrt(var[:, :, 0]) * jnp.sqrt(var[:, :, 1])
+    chi2 = (jnp.square(residual[:, :, 0]) * var[:, :, 1] + jnp.square(residual[:, :, 1]) * var[:, :, 0] - 2 * residual[:, :, 0] * residual[:, :, 1] * covs) / det_C
+    chi2 += jnp.log(det_C) + 2 * jnp.log(2 * jnp.pi)
+    chi2 *= -0.5
+    chi2 = jnp.stack([chi2, jnp.zeros_like(chi2)], axis=2)
+    return chi2
+
+def chi2_norm_term(errors, corrs):
+    sigma2 = jnp.square(errors)
+
+    if corrs is None:
+        norm = -jnp.log(jnp.sqrt(2 * jnp.pi * sigma2))
+    else:
+        has_no_corr = jnp.isnan(corrs)
+        yes_corr = jnp.where(~has_no_corr)[0]
+        no_corr = jnp.where(has_no_corr)[0]
+
+        norm = jnp.zeros_like(errors)
+        norm = jax.ops.index_update(norm, jax.ops.index[no_corr], -jnp.log(jnp.sqrt(2 * jnp.pi * sigma2[no_corr])))
+
+        det_C = sigma2[yes_corr[0], 0] * sigma2[yes_corr[0], 1] * (1 - jnp.square(corrs[yes_corr]))
+        norm = jax.ops.index_update(norm, jax.ops.index[yes_corr, 0], -0.5 * (det_C + 2 * jnp.log(2 * jnp.pi)))
+
+    return jnp.sum(norm)
+
+#commented all code below
+
+'''
 """
 This module contains functions for computing log(likelihood).
 """
@@ -187,3 +287,4 @@ def chi2_norm_term(errors, corrs):
         norm[yes_corr,0] = -0.5 * (det_C + 2 * np.log(2 * np.pi)) # extra factor of 2 since quant1 and quant2 in each element of chi2.
 
     return np.sum(norm)
+'''
