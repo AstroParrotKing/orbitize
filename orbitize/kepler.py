@@ -14,6 +14,7 @@ if cuda_ext:
     
 import jax
 import jax.numpy as jnp
+from jax import vmap
 
 from jax.config import config; config.update("jax_enable_x64", True)
 
@@ -31,12 +32,19 @@ def tau_to_manom(date, sma, mtot, tau, tau_ref_epoch):
     Returns:
         float or np.array: mean anomaly on that date [0, 2pi)
     """
-
-    period = np.sqrt(
-        4 * np.pi**2.0 * (sma * u.AU)**3 /
-        (consts.G * (mtot * u.Msun))
-    )
-    period = period.to(u.day).value
+    try:
+        period = np.sqrt(
+            4 * np.pi**2.0 * (sma * u.AU)**3 /
+            (consts.G * (mtot * u.Msun))
+        )
+        period = period.to(u.day).value
+        
+    except TypeError:
+        period = np.sqrt(
+            4 * np.pi**2.0 * (jax.lax.stop_gradient(sma) * u.AU)**3 /
+            (consts.G * ((mtot) * u.Msun)))
+        
+        period = period.to(u.day).value
 
     frac_date = (date - tau_ref_epoch)/period
     frac_date %= 1
@@ -45,6 +53,8 @@ def tau_to_manom(date, sma, mtot, tau, tau_ref_epoch):
     mean_anom %= 2 * np.pi
 
     return mean_anom
+    
+
 
 def calc_orbit(
   epochs, sma, ecc, inc, aop, pan, tau, plx, mtot, mass_for_Kamp=None, tau_ref_epoch=58849, tolerance=1e-9, 
@@ -99,8 +109,8 @@ def calc_orbit(
     ecc_arr = jnp.tile(ecc, (n_dates, 1))
 
     manom = tau_to_manom(epochs[:, None], sma, mtot, tau, tau_ref_epoch)
-    # eanom = _calc_ecc_anom_loop(manom, ecc_arr)
-    eanom = _calc_ecc_anom(manom, ecc_arr, tolerance=tolerance, max_iter=max_iter, use_c=use_c, use_gpu=use_gpu)
+    # eanom = _calc_ecc_anom(manom, ecc_arr, tolerance=tolerance, max_iter=max_iter, use_c=use_c, use_gpu=use_gpu)
+    eanom = _calc_ecc_anom(manom, ecc_arr, tolerance=tolerance, max_iter=max_iter)
     tanom = 2.0 * jnp.arctan(jnp.sqrt((1.0 + ecc) / (1.0 - ecc)) * jnp.tan(0.5 * eanom))
     radius = sma * (1.0 - ecc * jnp.cos(eanom))
 
@@ -115,21 +125,82 @@ def calc_orbit(
 
     raoff = radius * (c2i2 * s1 - s2i2 * s2) * plx
     deoff = radius * (c2i2 * c1 + s2i2 * c2) * plx
+
+    # Define constants
+    G = 6.67430e-11  # Gravitational constant in m^3/kg/s^2
+    Msun = 1.989e30  # Solar mass in kg
+    au = 149597870700  # Astronomical unit in meters
+    # Perform the manual conversion
+    Kv = jnp.sqrt(G / (1.0 - ecc**2)) * (mass_for_Kamp * Msun * jnp.sin(inc)) / jnp.sqrt(mtot * Msun) / jnp.sqrt(sma * au)
     
+    # Convert to km/s (1 m/s = 0.001 km/s)
+    Kv = Kv * 0.001
+
+    # compute the vz
+    vz = Kv * (ecc*jnp.cos(aop) + jnp.cos(aop + tanom))
+    # Squeeze out extra dimension (useful if n_orbs = 1, does nothing if n_orbs > 1)
+    vz = np.squeeze(vz)[()]
+    '''
     # compute the radial velocity (vz) of the body (size: n_orbs x n_dates)
     # first comptue the RV semi-amplitude (size: n_orbs x n_dates)
     Kv = np.sqrt(consts.G / (1.0 - ecc**2)) * (mass_for_Kamp * u.Msun * np.sin(inc)) / np.sqrt(mtot * u.Msun) / np.sqrt(sma * u.au)
+
     # Convert to km/s
     Kv = Kv.to(u.km/u.s)
 
     # compute the vz
     vz = Kv.value * (ecc*np.cos(aop) + np.cos(aop + tanom))
     # Squeeze out extra dimension (useful if n_orbs = 1, does nothing if n_orbs > 1)
-    vz = np.squeeze(vz)[()]
+    vz = np.squeeze(vz)[()]'''
     
     return raoff, deoff, vz
 
 
+def _calc_ecc_anom(manom, ecc, tolerance=1e-9, max_iter=100, use_c=False, use_gpu=False):
+    """
+    Computes the eccentric anomaly from the mean anomlay.
+    Code from Rob De Rosa's orbit solver (e < 0.95 use Newton, e >= 0.95 use Mikkola)
+
+    Args:
+        manom (float/np.array): mean anomaly, either a scalar or np.array of any shape
+        ecc (float/np.array): eccentricity, either a scalar or np.array of the same shape as manom
+        tolerance (float, optional): absolute tolerance of iterative computation. Defaults to 1e-9.
+        max_iter (int, optional): maximum number of iterations before switching. Defaults to 100.
+        use_c (bool, optional): Use the C solver if configured. Defaults to False
+        use_gpu (bool, optional): Use the GPU solver if configured. Defaults to False
+
+Return:
+        eanom (float/np.array): eccentric anomalies, same shape as manom
+
+    Written: Jason Wang, 2018
+    """
+    alpha = (1.0 - ecc) / ((4.0 * ecc) + 0.5)
+    beta = (0.5 * manom) / ((4.0 * ecc) + 0.5)
+
+    aux = jnp.sqrt(beta**2.0 + alpha**3.0)
+    z = jnp.abs(beta + aux)**(1.0/3.0)
+
+    s0 = z - (alpha/z)
+    s1 = s0 - (0.078*(s0**5.0)) / (1.0 + ecc)
+    e0 = manom + (ecc * (3.0*s1 - 4.0*(s1**3.0)))
+
+    se0 = jnp.sin(e0)
+    ce0 = jnp.cos(e0)
+
+    f = e0-ecc*se0-manom
+    f1 = 1.0-ecc*ce0
+    f2 = ecc*se0
+    f3 = ecc*ce0
+    f4 = -f2
+    u1 = -f/f1
+    u2 = -f/(f1+0.5*f2*u1)
+    u3 = -f/(f1+0.5*f2*u2+(1.0/6.0)*f3*u2*u2)
+    u4 = -f/(f1+0.5*f2*u3+(1.0/6.0)*f3*u3*u3+(1.0/24.0)*f4*(u3**3.0))
+
+    return (e0 + u4)
+
+
+'''
 def _calc_ecc_anom(manom, ecc, tolerance=1e-9, max_iter=100, use_c=False, use_gpu=False):
     """
     Computes the eccentric anomaly from the mean anomlay.
@@ -184,7 +255,7 @@ Return:
     if len(ind_high[0]) > 0: 
         eanom[ind_high] = _mikkola_solver_wrapper(manom[ind_high], ecc[ind_high], use_c, use_gpu)
 
-    return np.squeeze(eanom)[()]
+    return np.squeeze(eanom)[()]'''
 
 def _newton_solver_wrapper(manom, ecc, tolerance, max_iter, use_c=False, use_gpu=False):
     """
@@ -202,14 +273,27 @@ def _newton_solver_wrapper(manom, ecc, tolerance, max_iter, use_c=False, use_gpu
 
     Written: Devin Cody, 2021
     """
-    eanom = np.empty_like(manom)
+    print("MANOM 1",type(manom))
+    try:
+        eanom = np.empty_like(manom)
+    except:
+        eanom = np.empty_like(jax.lax.stop_gradient(manom))
     
     if cuda_ext and use_gpu:
         # the CUDA solver returns eanom = -1 if it doesnt converge after max_iter iterations
         eanom = _CUDA_newton_solver(manom, ecc, tolerance=tolerance, max_iter=max_iter)
     elif cext and use_c:
         # the C solver returns eanom = -1 if it doesnt converge after max_iter iterations
-        eanom = _kepler._c_newton_solver(manom, ecc, tolerance=tolerance, max_iter=max_iter)
+        try:
+            eanom = _kepler._c_newton_solver(manom, ecc, tolerance=tolerance, max_iter=max_iter)
+        except TypeError:
+
+            try:
+                eanom = _kepler._c_newton_solver(np.asarray(manom), np.asarray(ecc), tolerance=tolerance, max_iter=max_iter)
+            
+            except:
+                print("MANOM 2",type(manom))
+                eanom = _kepler._c_newton_solver(jax.lax.asarray(manom), jax.lax.asarray(ecc), tolerance=tolerance, max_iter=max_iter)
     else:
         eanom = _newton_solver(manom, ecc, tolerance=tolerance, max_iter=max_iter)
 
@@ -258,9 +342,6 @@ def _newton_solver(manom, ecc, tolerance=1e-9, max_iter=10, eanom0=None):
                              fal_fun=lambda x: x)
     
     return eanom
-
-
-
 
 
 def _CUDA_newton_solver(manom, ecc, tolerance=1e-9, max_iter=100, eanom0=None):
