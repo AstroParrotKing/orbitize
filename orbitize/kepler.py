@@ -32,20 +32,27 @@ def tau_to_manom(date, sma, mtot, tau, tau_ref_epoch):
     Returns:
         float or np.array: mean anomaly on that date [0, 2pi)
     """
-    try:
-        period = np.sqrt(
-            4 * np.pi**2.0 * (sma * u.AU)**3 /
-            (consts.G * (mtot * u.Msun))
-        )
-        period = period.to(u.day).value
+    # try:
+    #     period = np.sqrt(
+    #         4 * np.pi**2.0 * (sma * u.AU)**3 /
+    #         (consts.G * (mtot * u.Msun))
+    #     )
+    #     period = period.to(u.day).value
         
-    except TypeError:
-        period = np.sqrt(
-            4 * np.pi**2.0 * (jax.lax.stop_gradient(sma) * u.AU)**3 /
-            (consts.G * ((mtot) * u.Msun)))
+    # except TypeError:
+    #     period = np.sqrt(
+    #         4 * np.pi**2.0 * (jax.lax.stop_gradient(sma) * u.AU)**3 /
+    #         (consts.G * ((mtot) * u.Msun)))
         
-        period = period.to(u.day).value
-
+    #     period = period.to(u.day).value
+    
+    G = consts.G.value  # m^3 kg^-1 s^-2
+    AU = consts.au.value  # m
+    day = (60 * 60 * 24)  # s
+    
+    period = jnp.sqrt((4 * jnp.pi**2 * (sma * AU)**3) / (G * (mtot * consts.M_sun.value)))
+    period = period / day
+    
     frac_date = (date - tau_ref_epoch)/period
     frac_date %= 1
 
@@ -98,7 +105,7 @@ def calc_orbit(
 
     Written: Jason Wang, Henry Ngo, 2018
     """
-    n_orbs = jnp.size(sma)
+    # n_orbs = jnp.size(sma)
     n_dates = jnp.size(epochs)
 
     if mass_for_Kamp is None:
