@@ -131,7 +131,10 @@ def calc_orbit(epochs, sma, ecc, inc, aop, pan, tau, plx, mtot, mass_for_Kamp=No
     raoff = radius * (c2i2 * s1 - s2i2 * s2) * plx
     deoff = radius * (c2i2 * c1 + s2i2 * c2) * plx
 
-    vz = 0.0
+    # vz = Kv.value * (ecc*np.cos(aop) + np.cos(aop + tanom))
+    # # Squeeze out extra dimension (useful if n_orbs = 1, does nothing if n_orbs > 1)
+    # vz = np.squeeze(vz)[()]
+    vz = np.zeros_like(deoff)
     return raoff, deoff, vz
 
 @njit
