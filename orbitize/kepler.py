@@ -132,7 +132,7 @@ def calc_orbit(epochs, sma, ecc, inc, aop, pan, tau, plx, mtot, mass_for_Kamp=No
     deoff = radius * (c2i2 * c1 + s2i2 * c2) * plx
 
     vz = 0.0
-    return raoff, deoff
+    return raoff, deoff, vz
 
 @njit
 def _calc_ecc_anom(manom, ecc, tolerance=1e-9, max_iter=100, use_c=False, use_gpu=False):
